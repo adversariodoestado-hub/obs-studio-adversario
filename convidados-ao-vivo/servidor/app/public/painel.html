@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Painel do apresentador</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/estilo.css">
+</head>
+<body class="painel">
+<section id="login" class="cartao">
+  <h1>Painel do apresentador</h1>
+  <label>Senha do apresentador <input id="senha" type="password" autocomplete="current-password"></label>
+  <button id="btnEntrar" class="primario">Abrir painel</button>
+  <p id="erroLogin" class="erro"></p>
+</section>
+
+<div id="app" hidden>
+  <header class="barra">
+    <strong>Convidados ao Vivo</strong>
+    <span id="contagem" class="selo"></span>
+    <span class="espaco"></span>
+    <button id="btnFalar">🎙️ Falar com os convidados</button>
+    <select id="layout" title="Layout do palco">
+      <option value="grade">Layout: grade</option>
+      <option value="destaque">Layout: destaque</option>
+    </select>
+    <label class="check"><input type="checkbox" id="nomes" checked> Nomes na tela</label>
+    <button id="btnLimpar">Tirar todos da tela</button>
+  </header>
+
+  <main class="colunas">
+    <section>
+      <h2>Na tela <small id="nNaTela"></small></h2>
+      <div id="naTela" class="grade-cards"></div>
+      <h2>Bastidores <small id="nBastidores"></small></h2>
+      <div id="bastidores" class="grade-cards"></div>
+      <p id="vazio" class="dica">Ninguém entrou ainda. Mande o link de convite ao lado.</p>
+    </section>
+
+    <aside>
+      <h2>Convite</h2>
+      <div class="copiar"><input id="linkConvite" readonly><button data-copiar="linkConvite">Copiar</button></div>
+
+      <h2>Fontes do OBS</h2>
+      <p class="dica">No OBS: Fontes → + → Navegador. Cole a URL, largura 1920, altura 1080, e marque “Controlar áudio pelo OBS”.</p>
+      <label>Palco com layout automático</label>
+      <div class="copiar"><input id="linkPalco" readonly><button data-copiar="linkPalco">Copiar</button></div>
+      <label>Vagas individuais (um convidado por fonte, para montar layout à mão)</label>
+      <div id="vagas"></div>
+
+      <h2>Prévia do palco</h2>
+      <label class="check"><input type="checkbox" id="mostrarPrevia"> Mostrar prévia (consome banda extra)</label>
+      <div class="previa-palco"><iframe id="previaPalco" title="Prévia do palco"></iframe></div>
+    </aside>
+  </main>
+</div>
+
+<script src="/lib/livekit-client.umd.js"></script>
+<script src="/comum.js"></script>
+<script>
+const { LK, pedirToken, lerPalco, papelDe, iniciais } = Comum;
+const $ = (id) => document.getElementById(id);
+
+let chave = localStorage.getItem('cav-chave') || '';
+let room;
+const cards = new Map(); // identidade -> elemento
+
+async function api(caminho, corpo) {
+  const r = await fetch(caminho, {
+    method: corpo ? 'POST' : 'GET',
+    headers: { 'content-type': 'application/json', 'x-chave': chave },
+    body: corpo ? JSON.stringify(corpo) : undefined,
+  });
+  const dados = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(dados.erro || `Erro ${r.status}`);
+  return dados;
+}
+
+const palcoAtual = () => lerPalco(room);
+const mudarPalco = (alteracao) => api('/api/palco', alteracao).catch((e) => alert(e.message));
+
+function convidados() {
+  return [...room.remoteParticipants.values()].filter((p) => papelDe(p) === 'convidado');
+}
+
+function criarCard(p) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="mini"><video autoplay playsinline muted></video><div class="avatar"></div></div>
+    <div class="info"><span class="nome"></span><span class="mic"></span></div>
+    <div class="acoes">
+      <button class="primario" data-acao="alternar"></button>
+      <button data-acao="subir" title="Mover para antes">◀</button>
+      <button data-acao="descer" title="Mover para depois">▶</button>
+      <button data-acao="ouvir" title="Ouvir este convidado nos bastidores">🎧</button>
+      <button class="perigo" data-acao="remover" title="Remover da sala">✕</button>
+    </div>`;
+  el.addEventListener('click', (ev) => {
+    const acao = ev.target.dataset?.acao;
+    if (!acao) return;
+    const { noPalco } = palcoAtual();
+    const id = p.identity;
+    const i = noPalco.indexOf(id);
+    if (acao === 'alternar') mudarPalco({ noPalco: i >= 0 ? noPalco.filter((x) => x !== id) : [...noPalco, id] });
+    if ((acao === 'subir' && i > 0) || (acao === 'descer' && i >= 0 && i < noPalco.length - 1)) {
+      const j = acao === 'subir' ? i - 1 : i + 1;
+      const nova = [...noPalco];
+      [nova[i], nova[j]] = [nova[j], nova[i]];
+      mudarPalco({ noPalco: nova });
+    }
+    if (acao === 'ouvir') { el.classList.toggle('ouvindo'); render(); }
+    if (acao === 'remover' && confirm(`Remover ${p.name} da sala?`)) api('/api/remover', { identidade: id });
+  });
+  cards.set(p.identity, el);
+  return el;
+}
+
+function render() {
+  if (!room) return;
+  const { noPalco, layout, nomes } = palcoAtual();
+  $('layout').value = layout;
+  $('nomes').checked = nomes;
+
+  const lista = convidados();
+  const ids = new Set(lista.map((p) => p.identity));
+  for (const [id, el] of cards) if (!ids.has(id)) { el.remove(); cards.delete(id); }
+
+  const naTela = noPalco.map((id) => room.remoteParticipants.get(id)).filter(Boolean);
+  const bastidores = lista.filter((p) => !noPalco.includes(p.identity)).sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+
+  for (const [destino, grupo] of [[$('naTela'), naTela], [$('bastidores'), bastidores]]) {
+    grupo.forEach((p) => {
+      const el = cards.get(p.identity) || criarCard(p);
+      if (el.parentElement !== destino || destino.children[grupo.indexOf(p)] !== el) {
+        destino.insertBefore(el, destino.children[grupo.indexOf(p)] || null);
+      }
+      const noAr = noPalco.includes(p.identity);
+      const ouvindo = el.classList.contains('ouvindo');
+      el.classList.toggle('no-ar', noAr);
+      el.querySelector('.nome').textContent = p.name;
+      el.querySelector('.avatar').textContent = iniciais(p.name);
+      el.querySelector('[data-acao="alternar"]').textContent = noAr ? 'Tirar da tela' : 'Pôr na tela';
+      const mic = p.getTrackPublication(LK.Track.Source.Microphone);
+      el.querySelector('.mic').textContent = !mic || mic.isMuted ? '🔇' : '🎙️';
+
+      // Vídeo em baixa qualidade para a miniatura; áudio de quem está na tela
+      // (ou de quem o apresentador escolheu ouvir nos bastidores).
+      for (const pub of p.trackPublications.values()) {
+        const quer = pub.kind === 'video' ? pub.source === LK.Track.Source.Camera : noAr || ouvindo;
+        if (pub._desejado !== quer) { pub._desejado = quer; pub.setSubscribed(quer); }
+        if (pub.kind === 'video' && pub.isSubscribed) pub.setVideoQuality(LK.VideoQuality.LOW);
+      }
+      const cam = p.getTrackPublication(LK.Track.Source.Camera);
+      const video = el.querySelector('video');
+      if (cam?.track && el._track !== cam.track) { el._track?.detach(video); cam.track.attach(video); el._track = cam.track; }
+      el.classList.toggle('sem-video', !cam?.track || cam.isMuted);
+    });
+  }
+
+  $('nNaTela').textContent = `(${naTela.length})`;
+  $('nBastidores').textContent = `(${bastidores.length})`;
+  $('contagem').textContent = `${lista.length} convidado(s) na sala`;
+  $('vazio').hidden = lista.length > 0;
+  renderVagas(Math.max(4, naTela.length));
+}
+
+function renderVagas(n) {
+  const base = `${location.origin}/palco?chave=${encodeURIComponent(chave)}&audio=0&vaga=`;
+  if ($('vagas').children.length === n) return;
+  $('vagas').innerHTML = Array.from({ length: n }, (_, i) =>
+    `<div class="copiar"><input id="vaga${i + 1}" readonly value="${base}${i + 1}"><button data-copiar="vaga${i + 1}">Vaga ${i + 1}</button></div>`).join('');
+}
+
+document.addEventListener('click', (ev) => {
+  const alvo = ev.target.dataset?.copiar;
+  if (!alvo) return;
+  const input = $(alvo);
+  input.select();
+  navigator.clipboard?.writeText(input.value).catch(() => document.execCommand('copy'));
+  ev.target.textContent = 'Copiado!';
+  setTimeout(() => { ev.target.textContent = alvo.startsWith('vaga') ? 'Vaga ' + alvo.slice(4) : 'Copiar'; }, 1500);
+});
+
+$('layout').onchange = () => mudarPalco({ layout: $('layout').value });
+$('nomes').onchange = () => mudarPalco({ nomes: $('nomes').checked });
+$('btnLimpar').onclick = () => mudarPalco({ noPalco: [] });
+$('mostrarPrevia').onchange = () => {
+  $('previaPalco').src = $('mostrarPrevia').checked ? `/palco?chave=${encodeURIComponent(chave)}&audio=0&fundo=000000` : 'about:blank';
+};
+
+$('btnFalar').onclick = async () => {
+  const lig = !room.localParticipant.isMicrophoneEnabled;
+  try {
+    await room.localParticipant.setMicrophoneEnabled(lig, { echoCancellation: true, noiseSuppression: true });
+    $('btnFalar').textContent = lig ? '🔴 Falando com os convidados' : '🎙️ Falar com os convidados';
+    $('btnFalar').classList.toggle('perigo', lig);
+  } catch (e) {
+    alert('Não consegui ligar o microfone: ' + e.message);
+  }
+};
+
+async function conectar() {
+  const { token, url } = await pedirToken({ papel: 'apresentador', nome: 'Apresentador', chave });
+  const estado = await api('/api/estado');
+  const c = estado.codigoConvite ? `?c=${encodeURIComponent(estado.codigoConvite)}` : '';
+  $('linkConvite').value = `${location.origin}/${c}`;
+  $('linkPalco').value = `${location.origin}/palco?chave=${encodeURIComponent(chave)}`;
+
+  room = new LK.Room({ adaptiveStream: true, dynacast: true });
+  const E = LK.RoomEvent;
+  [E.ParticipantConnected, E.ParticipantDisconnected, E.TrackPublished, E.TrackUnpublished, E.TrackSubscribed,
+   E.TrackUnsubscribed, E.TrackMuted, E.TrackUnmuted, E.RoomMetadataChanged, E.ParticipantNameChanged]
+    .forEach((ev) => room.on(ev, render));
+  room.on(E.TrackSubscribed, (track) => { if (track.kind === 'audio') document.body.appendChild(track.attach()); });
+  room.on(E.TrackUnsubscribed, (track) => { if (track.kind === 'audio') track.detach().forEach((el) => el.remove()); });
+  room.on(E.Disconnected, () => setTimeout(() => conectar().catch(() => {}), 3000));
+  await room.connect(url, token, { autoSubscribe: false });
+  await room.startAudio().catch(() => {});
+  render();
+  // Limpeza periódica: o servidor tira do palco quem já saiu.
+  if (!window._limpeza) window._limpeza = setInterval(() => api('/api/estado').catch(() => {}), 10000);
+}
+
+$('btnEntrar').onclick = async () => {
+  chave = $('senha').value;
+  $('erroLogin').textContent = '';
+  try {
+    await api('/api/estado');
+    localStorage.setItem('cav-chave', chave);
+    $('login').hidden = true;
+    $('app').hidden = false;
+    await conectar();
+  } catch (e) {
+    $('erroLogin').textContent = e.message;
+  }
+};
+$('senha').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btnEntrar').click(); });
+if (chave) { $('senha').value = chave; $('btnEntrar').click(); }
+</script>
+</body>
+</html>

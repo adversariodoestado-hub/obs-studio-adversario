@@ -1,0 +1,34 @@
+# Sobe tudo na VPS: LiveKit (vídeo), servidor de convites e Caddy (HTTPS automático).
+# Use "network_mode: host" porque o LiveKit precisa de milhares de portas UDP.
+services:
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    command: --config /etc/livekit.yaml
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+  app:
+    build: ./app
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    depends_on: [livekit]
+
+  caddy:
+    image: caddy:2.11.9-alpine
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      DOMINIO: "${DOMINIO}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

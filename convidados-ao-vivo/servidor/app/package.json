@@ -1,0 +1,16 @@
+{
+  "name": "convidados-ao-vivo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Servidor de convites e controle de palco para lives com convidados no OBS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "livekit-client": "^2.15.0",
+    "livekit-server-sdk": "^2.13.0"
+  }
+}
