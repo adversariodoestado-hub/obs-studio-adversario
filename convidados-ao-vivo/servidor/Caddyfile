@@ -1,0 +1,10 @@
+{$DOMINIO} {
+	encode gzip
+
+	# Sinalização do LiveKit (WebSocket) e API interna dele
+	@livekit path /rtc /rtc/* /twirp/*
+	reverse_proxy @livekit 127.0.0.1:7880
+
+	# Páginas e API do Convidados ao Vivo
+	reverse_proxy 127.0.0.1:3000
+}

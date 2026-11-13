@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Palco (fonte do OBS)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; font-family: system-ui, sans-serif; }
+  #tela { position: absolute; inset: 0; }
+  .quadro { position: absolute; overflow: hidden; border-radius: var(--raio, 12px); background: #1d1f24; transition: left .35s, top .35s, width .35s, height .35s; }
+  .quadro video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .quadro .avatar { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: #fff; font-size: 6vh; font-weight: 600; background: linear-gradient(135deg, #3b4252, #1d1f24); }
+  .quadro.sem-video .avatar { display: flex; }
+  .quadro.sem-video video { visibility: hidden; }
+  .nome { position: absolute; left: 1.2vh; bottom: 1.2vh; padding: .5vh 1.2vh; border-radius: .8vh; background: rgba(0,0,0,.6); color: #fff; font-size: 2.4vh; font-weight: 600; max-width: 80%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mudo::after { content: " 🔇"; }
+  #aviso { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); color: #fff; background: rgba(0,0,0,.6); padding: 2vh 3vh; border-radius: 1vh; font-size: 2.6vh; display: none; }
+</style>
+</head>
+<body>
+<div id="tela"></div>
+<div id="aviso"></div>
+<script src="/lib/livekit-client.umd.js"></script>
+<script src="/comum.js"></script>
+<script>
+const { LK, params, pedirToken, lerPalco, papelDe, calcularLayout, iniciais } = Comum;
+
+// Parâmetros da URL:
+//   chave=SENHA      senha do apresentador (obrigatória)
+//   vaga=N           mostra só o N-ésimo convidado do palco, em tela cheia
+//   audio=0          não toca o áudio (use quando tiver palco + vagas ao mesmo tempo)
+//   fundo=RRGGBB     cor de fundo (padrão: transparente)
+//   espaco=1         espaço entre quadros, em % da tela
+//   raio=12          arredondamento dos cantos, em px
+const chave = params.get('chave') || '';
+const vaga = parseInt(params.get('vaga') || '0', 10);
+const comAudio = params.get('audio') !== '0';
+const espaco = vaga ? 0 : Number(params.get('espaco') ?? 1);
+if (params.get('fundo')) document.body.style.background = '#' + params.get('fundo').replace(/[^0-9a-f]/gi, '');
+document.documentElement.style.setProperty('--raio', (vaga ? 0 : Number(params.get('raio') ?? 12)) + 'px');
+
+const tela = document.getElementById('tela');
+const aviso = document.getElementById('aviso');
+const quadros = new Map(); // identidade -> { el, video, nome, avatar }
+let room;
+
+function avisar(texto) {
+  aviso.textContent = texto;
+  aviso.style.display = texto ? 'block' : 'none';
+}
+
+function quemAparece() {
+  const { noPalco } = lerPalco(room);
+  const presentes = noPalco.filter((id) => room.remoteParticipants.has(id));
+  if (vaga) return presentes[vaga - 1] ? [presentes[vaga - 1]] : [];
+  return presentes;
+}
+
+function criarQuadro(id) {
+  const el = document.createElement('div');
+  el.className = 'quadro sem-video';
+  el.innerHTML = '<video autoplay playsinline muted></video><div class="avatar"></div><div class="nome"></div>';
+  tela.appendChild(el);
+  const q = { el, video: el.querySelector('video'), nome: el.querySelector('.nome'), avatar: el.querySelector('.avatar'), track: null };
+  quadros.set(id, q);
+  return q;
+}
+
+function render() {
+  if (!room) return;
+  const estado = lerPalco(room);
+  const ids = quemAparece();
+
+  // Assina só o que está no palco: quem está nos bastidores não gasta banda.
+  for (const p of room.remoteParticipants.values()) {
+    const noAr = ids.includes(p.identity);
+    for (const pub of p.trackPublications.values()) {
+      let quer = noAr;
+      if (pub.kind === 'audio' && (!comAudio || papelDe(p) === 'apresentador')) quer = false;
+      if (pub.source === LK.Track.Source.ScreenShare || pub.source === LK.Track.Source.ScreenShareAudio) quer = false;
+      if (pub._desejado !== quer) { pub._desejado = quer; pub.setSubscribed(quer); }
+    }
+  }
+
+  for (const [id, q] of quadros) {
+    if (!ids.includes(id)) {
+      q.track?.detach(q.video);
+      q.el.remove();
+      quadros.delete(id);
+    }
+  }
+
+  const rects = calcularLayout(ids.length, vaga ? 'grade' : estado.layout, espaco);
+  ids.forEach((id, i) => {
+    const p = room.remoteParticipants.get(id);
+    const q = quadros.get(id) || criarQuadro(id);
+    const r = rects[i];
+    Object.assign(q.el.style, { left: r.x + '%', top: r.y + '%', width: r.w + '%', height: r.h + '%' });
+
+    const cam = p.getTrackPublication(LK.Track.Source.Camera);
+    const mic = p.getTrackPublication(LK.Track.Source.Microphone);
+    const track = cam?.track;
+    if (track !== q.track) {
+      q.track?.detach(q.video);
+      if (track) track.attach(q.video);
+      q.track = track || null;
+    }
+    q.el.classList.toggle('sem-video', !track || cam.isMuted);
+    q.avatar.textContent = iniciais(p.name);
+    q.nome.textContent = p.name || '';
+    q.nome.style.display = estado.nomes ? '' : 'none';
+    q.nome.classList.toggle('mudo', !mic || mic.isMuted);
+  });
+}
+
+async function conectar() {
+  if (!chave) return avisar('Falta ?chave= na URL desta fonte.');
+  try {
+    const { token, url } = await pedirToken({ papel: 'palco', chave });
+    room = new LK.Room({ adaptiveStream: true, dynacast: true });
+    const E = LK.RoomEvent;
+    [E.ParticipantConnected, E.ParticipantDisconnected, E.TrackPublished, E.TrackUnpublished, E.TrackSubscribed,
+     E.TrackUnsubscribed, E.TrackMuted, E.TrackUnmuted, E.RoomMetadataChanged, E.ParticipantNameChanged]
+      .forEach((ev) => room.on(ev, render));
+    room.on(E.TrackSubscribed, (track) => {
+      if (track.kind === 'audio') document.body.appendChild(track.attach());
+    });
+    room.on(E.TrackUnsubscribed, (track) => {
+      if (track.kind === 'audio') track.detach().forEach((el) => el.remove());
+    });
+    room.on(E.Disconnected, () => {
+      for (const q of quadros.values()) q.el.remove();
+      quadros.clear();
+      avisar('Reconectando…');
+      setTimeout(conectar, 3000);
+    });
+    await room.connect(url, token, { autoSubscribe: false });
+    avisar('');
+    render();
+  } catch (e) {
+    avisar('Sem conexão: ' + e.message + '. Tentando de novo…');
+    setTimeout(conectar, 5000);
+  }
+}
+
+conectar();
+</script>
+</body>
+</html>

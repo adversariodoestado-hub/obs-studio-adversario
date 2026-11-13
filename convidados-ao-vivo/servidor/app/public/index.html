@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Entrar na live</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/estilo.css">
+</head>
+<body>
+<main class="cartao">
+  <h1>Entrar na live</h1>
+
+  <div class="previa">
+    <video id="previa" autoplay playsinline muted></video>
+    <div id="estado" class="selo">Prévia da câmera</div>
+  </div>
+
+  <section id="entrada">
+    <label>Seu nome
+      <input id="nome" maxlength="40" placeholder="Como você quer aparecer na tela" autocomplete="name">
+    </label>
+    <label id="campoConvite" hidden>Código do convite
+      <input id="convite" maxlength="64">
+    </label>
+    <div class="linha">
+      <label>Câmera <select id="cameras"></select></label>
+      <label>Microfone <select id="mics"></select></label>
+    </div>
+    <button id="entrar" class="primario" disabled>Entrar nos bastidores</button>
+  </section>
+
+  <section id="sala" hidden>
+    <p id="mensagem">Você está nos bastidores. Aguarde o apresentador te chamar para a tela.</p>
+    <div class="linha">
+      <button id="btnMic">🎙️ Microfone ligado</button>
+      <button id="btnCam">📷 Câmera ligada</button>
+      <button id="btnSair" class="perigo">Sair</button>
+    </div>
+  </section>
+
+  <p id="erro" class="erro"></p>
+  <p class="dica">Use fones de ouvido para evitar eco. No celular, deixe a tela ligada enquanto estiver na live.</p>
+</main>
+
+<script src="/lib/livekit-client.umd.js"></script>
+<script src="/comum.js"></script>
+<script>
+const { LK, params, pedirToken, lerPalco, papelDe } = Comum;
+const $ = (id) => document.getElementById(id);
+const erro = (t) => { $('erro').textContent = t || ''; };
+
+let tracks = [];
+let room;
+
+$('nome').value = localStorage.getItem('cav-nome') || '';
+if (params.get('c')) $('convite').value = params.get('c');
+
+async function abrirPrevia() {
+  tracks.forEach((t) => t.stop());
+  try {
+    tracks = await LK.createLocalTracks({
+      audio: { deviceId: $('mics').value || undefined, echoCancellation: true, noiseSuppression: true },
+      video: { deviceId: $('cameras').value || undefined, resolution: LK.VideoPresets.h720.resolution },
+    });
+    const video = tracks.find((t) => t.kind === 'video');
+    if (video) video.attach($('previa'));
+    $('entrar').disabled = false;
+    erro('');
+  } catch (e) {
+    erro('Não consegui acessar câmera/microfone. Libere a permissão no navegador e recarregue a página. (' + e.message + ')');
+  }
+}
+
+async function listarDispositivos() {
+  for (const [tipo, sel] of [['videoinput', 'cameras'], ['audioinput', 'mics']]) {
+    const lista = await LK.Room.getLocalDevices(tipo).catch(() => []);
+    const atual = $(sel).value;
+    $(sel).innerHTML = lista.map((d, i) => `<option value="${d.deviceId}">${d.label || (tipo === 'videoinput' ? 'Câmera ' : 'Microfone ') + (i + 1)}</option>`).join('');
+    if (atual) $(sel).value = atual;
+  }
+}
+
+$('cameras').onchange = abrirPrevia;
+$('mics').onchange = abrirPrevia;
+
+function atualizarSala() {
+  if (!room) return;
+  const { noPalco } = lerPalco(room);
+  const noAr = noPalco.includes(room.localParticipant.identity);
+  $('estado').textContent = noAr ? '🔴 AO VIVO' : 'Nos bastidores';
+  $('estado').classList.toggle('ao-vivo', noAr);
+  $('mensagem').textContent = noAr
+    ? 'Você está na tela da live agora.'
+    : 'Você está nos bastidores. Aguarde o apresentador te chamar para a tela.';
+
+  // Ouve o apresentador e quem está no palco. Ninguém assina vídeo aqui,
+  // para o convidado gastar só a banda de envio da própria câmera.
+  for (const p of room.remoteParticipants.values()) {
+    const ouvir = papelDe(p) === 'apresentador' || noPalco.includes(p.identity);
+    for (const pub of p.trackPublications.values()) {
+      const quer = pub.kind === 'audio' && ouvir;
+      if (pub._desejado !== quer) { pub._desejado = quer; pub.setSubscribed(quer); }
+    }
+  }
+}
+
+$('entrar').onclick = async () => {
+  $('entrar').disabled = true;
+  erro('');
+  const nome = $('nome').value.trim();
+  if (!nome) { erro('Digite seu nome.'); $('entrar').disabled = false; return; }
+  localStorage.setItem('cav-nome', nome);
+  try {
+    const { token, url } = await pedirToken({ papel: 'convidado', nome, convite: $('convite').value.trim() });
+    room = new LK.Room({
+      adaptiveStream: true,
+      dynacast: true,
+      publishDefaults: { simulcast: true, videoSimulcastLayers: [LK.VideoPresets.h180, LK.VideoPresets.h360] },
+    });
+    const E = LK.RoomEvent;
+    [E.ParticipantConnected, E.TrackPublished, E.RoomMetadataChanged].forEach((ev) => room.on(ev, atualizarSala));
+    room.on(E.TrackSubscribed, (track) => { if (track.kind === 'audio') document.body.appendChild(track.attach()); });
+    room.on(E.TrackUnsubscribed, (track) => track.detach().forEach((el) => el.remove()));
+    room.on(E.Disconnected, () => {
+      $('sala').hidden = true; $('entrada').hidden = false; $('entrar').disabled = false;
+      $('estado').textContent = 'Você saiu da sala'; $('estado').classList.remove('ao-vivo');
+      room = null;
+      abrirPrevia();
+    });
+    await room.connect(url, token, { autoSubscribe: false });
+    await room.startAudio();
+    for (const t of tracks) await room.localParticipant.publishTrack(t);
+    $('entrada').hidden = true;
+    $('sala').hidden = false;
+    atualizarSala();
+  } catch (e) {
+    if (/convite/i.test(e.message)) $('campoConvite').hidden = false;
+    erro(e.message);
+    $('entrar').disabled = false;
+  }
+};
+
+$('btnMic').onclick = async () => {
+  const lig = !room.localParticipant.isMicrophoneEnabled;
+  await room.localParticipant.setMicrophoneEnabled(lig);
+  $('btnMic').textContent = lig ? '🎙️ Microfone ligado' : '🔇 Microfone desligado';
+};
+$('btnCam').onclick = async () => {
+  const lig = !room.localParticipant.isCameraEnabled;
+  await room.localParticipant.setCameraEnabled(lig);
+  $('btnCam').textContent = lig ? '📷 Câmera ligada' : '🚫 Câmera desligada';
+};
+$('btnSair').onclick = () => room?.disconnect();
+
+(async () => {
+  await abrirPrevia();
+  await listarDispositivos();
+  navigator.mediaDevices?.addEventListener?.('devicechange', listarDispositivos);
+})();
+</script>
+</body>
+</html>
